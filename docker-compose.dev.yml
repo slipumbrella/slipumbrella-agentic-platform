@@ -1,0 +1,101 @@
+services:
+  frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - TZ=Asia/Bangkok
+      - WATCHPACK_POLLING=true
+    networks:
+      - app-network
+
+  backend-dev:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    networks:
+      - app-network
+    env_file:
+      - ./backend/.env
+    environment:
+      - TZ=Asia/Bangkok
+      - DB_HOST=postgres-dev
+      - DB_PORT=5432
+      - DB_NAME=agent_db
+      - DB_USER=postgres
+      - DB_PASSWORD=132157
+      - REDIS_HOST=redis-dev
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - GRPC_HOST=agent-dev
+      - GRPC_PORT=50051
+
+  agent-dev:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - "50051:50051"
+      - "50052:50052"
+    networks:
+      - app-network
+    volumes:
+      - ./agent/proto:/app/agent/proto:ro
+    env_file:
+      - ./agent/.env
+    environment:
+      - TZ=Asia/Bangkok
+      # Bind gRPC to all interfaces so the backend container can reach it
+      - GRPC_HOST=0.0.0.0
+      - GRPC_PORT=50051
+      - BACKEND_URL=http://backend-dev:8080
+      - DB_HOST=postgres-dev
+      - DB_PORT=5432
+      - DB_NAME=agent_db
+      - DB_USER=postgres
+      - DB_PASSWORD=132157
+      - REDIS_HOST=redis-dev
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+
+  postgres-dev:
+    image: pgvector/pgvector:pg17
+    container_name: agent_pg
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "132157"
+      POSTGRES_DB: agent_db
+    networks:
+      - app-network
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./backend/script/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+
+  redis-dev:
+    image: redis:alpine
+    container_name: agent_redis
+    restart: always
+    environment:
+      TZ: Asia/Bangkok
+      REDIS_PASSWORD: ""
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+
+networks:
+  app-network:
+    driver: bridge

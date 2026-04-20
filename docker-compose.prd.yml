@@ -1,0 +1,151 @@
+services:
+  frontend-prd:
+    image: registry.digitalocean.com/${DOCR_REGISTRY_NAME}/capstone-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - TZ=Asia/Bangkok
+      # Server-side (SSR) API URL — stays on Docker network, never leaves the host.
+      # NEXT_PUBLIC_API_URL (public URL) is baked into the bundle at build time for browser calls.
+      - INTERNAL_API_URL=http://backend-prd:8080/api
+    networks:
+      - slipumbrella-app-network
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    healthcheck:
+      # Check the Next.js root — /api/health is the Go backend route, not a frontend route
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  backend-prd:
+    image: registry.digitalocean.com/${DOCR_REGISTRY_NAME}/capstone-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # Bind to host so LINE webhook callbacks (and any other external services) can reach
+    # the backend directly. Frontend SSR uses the Docker-internal hostname (backend-prd:8080).
+    ports:
+      - "8080:8080"
+    networks:
+      - slipumbrella-app-network
+    env_file:
+      - ./backend/.env
+    environment:
+      - TZ=Asia/Bangkok
+      - REDIS_HOST=redis-prd
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - GRPC_HOST=agent-prd
+      - GRPC_PORT=50051
+      - DB_HOST=pgvector
+      - DB_PORT=5432
+
+    depends_on:
+      redis-prd:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  agent-prd:
+    image: registry.digitalocean.com/${DOCR_REGISTRY_NAME}/capstone-agent:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # 50051 (gRPC) is internal-only — backend reaches it via Docker network.
+    # 50052 (WebSocket) must be exposed to the host so browsers can connect as
+    # the emergency fallback when the primary backend WS path is unavailable.
+    expose:
+      - "50051"
+    ports:
+      - "50052:50052"
+    networks:
+      - slipumbrella-app-network
+    env_file:
+      - ./agent/.env
+    environment:
+      - TZ=Asia/Bangkok
+      # Bind gRPC to all interfaces so the backend container can reach it
+      - GRPC_HOST=0.0.0.0
+      - GRPC_PORT=50051
+      - BACKEND_URL=http://backend-prd:8080
+      - REDIS_HOST=redis-prd
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - DB_HOST=pgvector
+      - DB_PORT=5432
+    depends_on:
+      redis-prd:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    # TCP connect check — works without grpcurl in the image
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.settimeout(3); s.connect(('localhost',50051)); s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  redis-prd:
+    image: redis:7-alpine
+    container_name: agent_redis_prd
+    restart: unless-stopped
+    # Enforce password via CLI argument — REDIS_PASSWORD env var is ignored by Redis itself
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--loglevel", "warning"]
+    environment:
+      - TZ=Asia/Bangkok
+    # Redis is internal-only — no host port binding
+    expose:
+      - "6379"
+    networks:
+      - slipumbrella-app-network
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  slipumbrella-app-network:
+    external: true

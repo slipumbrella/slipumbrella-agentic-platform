@@ -1,0 +1,214 @@
+syntax = "proto3";
+
+package core_agent;
+
+option go_package = "capstone-prog/proto";
+
+message ChatRequest {
+    string session_id = 1;
+    string target_agent_id = 2;
+    string message = 3;
+    string presentation_mode = 4; // "workflow" | "chat" | "" (empty = ask before running)
+}
+
+message AgentInfo {
+    string id    = 1;
+    string role  = 2;
+    string goal  = 3;
+    repeated string tools = 4;
+    string model = 5;   // OpenRouter model ID
+    int32 order = 6;
+    bool is_leader = 7;
+}
+
+message PlanCreatedEvent {
+    string plan_id = 1;
+    string orchestration = 2;
+    repeated AgentInfo agents = 3;
+}
+
+message SessionRenamedEvent {
+    string session_id = 1;
+    string title = 2;
+}
+
+message TokenUsageEvent {
+    string agent_id      = 1;
+    string model_id      = 2;
+    int32  input_tokens  = 3;
+    int32  output_tokens = 4;
+}
+
+message WorkflowStartedEvent {
+    string trace_id = 1;
+    string execution_session_id = 2;
+    string orchestration = 3;
+    string status = 4;
+    string summary = 5;
+}
+
+message ThinkingItem {
+    string role         = 1;
+    string content_type = 2;
+    string text         = 3;
+    string tool_name    = 4;
+    string arguments    = 5;
+}
+
+message WorkflowTraceNode {
+    string agent_id = 1;
+    string agent_role = 2;
+    bool is_leader = 3;
+    int32 order = 4;
+    string status = 5;
+    string preview = 6;
+    string response = 7;
+    string error = 8;
+    string started_at = 9;
+    string completed_at = 10;
+    repeated ThinkingItem thinking = 11;
+}
+
+message WorkflowNodeUpdatedEvent {
+    string trace_id = 1;
+    string execution_session_id = 2;
+    string orchestration = 3;
+    string status = 4;
+    string summary = 5;
+    string agent_id = 6;
+    string agent_role = 7;
+    int32 order = 8;
+    string preview = 9;
+    string response = 10;
+    string error = 11;
+    string started_at = 12;
+    string completed_at = 13;
+    bool is_leader = 14;
+    repeated ThinkingItem thinking = 15;
+}
+
+message WorkflowCompletedEvent {
+    string trace_id = 1;
+    string execution_session_id = 2;
+    string orchestration = 3;
+    string status = 4;
+    string summary = 5;
+    string completed_at = 6;
+    repeated WorkflowTraceNode nodes = 7;
+}
+
+message WorkflowFailedEvent {
+    string trace_id = 1;
+    string execution_session_id = 2;
+    string orchestration = 3;
+    string status = 4;
+    string summary = 5;
+    string error = 6;
+    string completed_at = 7;
+    repeated WorkflowTraceNode nodes = 8;
+}
+
+message WorkflowStoppedEvent {
+    string trace_id = 1;
+    string execution_session_id = 2;
+    string orchestration = 3;
+    string status = 4;
+    string summary = 5;
+    string stopped_at = 6;
+    string run_id = 7;
+    repeated WorkflowTraceNode nodes = 8;
+}
+
+message WorkflowPresentationPromptEvent {
+    string prompt_id = 1;
+    string question = 2;
+    string original_message = 3;
+}
+
+message ChatResponse {
+    string session_id = 1;
+    string agent_id = 2;
+    oneof payload {
+        string reply = 3;                             // Text chunk (existing)
+        PlanCreatedEvent plan_created = 4;            // Structured plan event
+        string error = 5;                             // Error message
+        SessionRenamedEvent session_renamed = 6;      // Session title rename event
+        TokenUsageEvent token_usage = 7;              // Token consumption event
+        WorkflowStartedEvent workflow_started = 8;
+        WorkflowNodeUpdatedEvent workflow_node_updated = 9;
+        WorkflowCompletedEvent workflow_completed = 10;
+        WorkflowFailedEvent workflow_failed = 11;
+        WorkflowPresentationPromptEvent workflow_presentation_prompt = 12;
+        WorkflowStoppedEvent workflow_stopped = 13;
+    }
+    string run_id = 14;                              // Execution run identity for streamed execution events
+}
+
+message AgentListResponse {
+    string role = 1;
+    string description = 2;
+}
+
+message ExecutePlanRequest {
+    string session_id = 1;
+}
+
+message ExecutePlanResponse {
+    string session_id = 1;
+    string result = 2;
+    string status = 3;
+}
+
+// StopRun targets the active execution run within an execution session.
+// The call is acknowledgement-oriented and may be handled idempotently by the server.
+message StopRunRequest {
+    string execution_session_id = 1;
+    string run_id = 2;
+}
+
+message StopRunResponse {
+    string execution_session_id = 1;
+    string run_id = 2;
+    string status = 3;
+    string message = 4;
+}
+
+message DocumentContent {
+    string file_key = 1;
+    string content = 2;
+    string file_name = 3;
+}
+
+message EvaluateRAGRequest {
+    string reference_id = 1;
+    string user_id = 2;
+    repeated DocumentContent documents = 3;
+    string session_name = 4;
+    string session_description = 5;
+    repeated string agent_roles = 6;
+}
+
+message RAGMetricResult {
+    string metric_name = 1;
+    double score = 2;
+    bool passed = 3;
+    string reason = 4;
+}
+
+message EvaluateRAGResponse {
+    string reference_id = 1;
+    double overall_score = 2;
+    repeated RAGMetricResult metrics = 3;
+    string status = 4;
+    string error_message = 5;
+    int32 test_cases_count = 6;
+}
+
+service CoreAgent {
+    rpc Chat (ChatRequest) returns (stream ChatResponse);
+    rpc GetAgentList (ChatRequest) returns (stream AgentListResponse);
+    rpc ExecutePlan (ExecutePlanRequest) returns (ExecutePlanResponse);
+    // StopRun acknowledges a cooperative stop request for an execution run.
+    rpc StopRun (StopRunRequest) returns (StopRunResponse);
+    rpc EvaluateRAG (EvaluateRAGRequest) returns (EvaluateRAGResponse);
+}

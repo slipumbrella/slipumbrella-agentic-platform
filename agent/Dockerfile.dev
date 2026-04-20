@@ -1,0 +1,32 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 1. Set environment variables early so they apply to all steps
+ENV PYTHONPATH="/app:/app/agent/grpc/generated"
+ENV PYTHONUTF8=1
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PYTHONIOENCODING=utf-8
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# Install git for git dependencies
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Copy dependency files first for caching
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies using uv
+RUN uv sync --frozen --no-dev
+
+# Copy application code
+COPY . /app/agent/
+
+# Generate gRPC
+RUN uv run python -m grpc_tools.protoc -I/app/agent/proto --python_out=/app/agent/grpc/generated --grpc_python_out=/app/agent/grpc/generated /app/agent/proto/core_agent.proto
+
+EXPOSE 50051
+
+CMD ["uv", "run", "python", "-m", "agent.grpc.server.server"]

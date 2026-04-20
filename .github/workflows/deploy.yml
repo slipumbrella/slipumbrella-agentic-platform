@@ -1,0 +1,267 @@
+name: Deploy App
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Deployment tag (defaults to 'latest')"
+        required: false
+        default: latest
+        type: string
+
+# ── Required GitHub Actions setup ─────────────────────────────────────────────
+# Secrets (Settings → Secrets → Actions):
+#   SSH_PRIVATE_KEY      — ED25519 private key for the admin user on the droplet
+#   BACKEND_ENV          — full contents of backend/.env (DB DSN, API keys, etc.)
+#   AGENT_ENV            — full contents of agent/.env  (Gemini key, DB DSN, etc.)
+#   REDIS_PASSWORD       — Redis auth password (used by compose + redis-server)
+#   DIGITALOCEAN_ACCESS_TOKEN — DigitalOcean API token with registry read/write access
+#
+# Variables (Settings → Variables → Actions):
+#   DROPLET_IP              — server IP (same variable as egco-capstone-prog-infas)
+#   DOCR_REGISTRY_NAME       — DigitalOcean Container Registry name
+#   FRONTEND_API_URL                — PUBLIC backend URL baked into Next.js bundle for browser calls (e.g. https://yourdomain.com/api)
+#                                     SSR calls use INTERNAL_API_URL=http://backend-prd:8080/api (injected by docker-compose.prd.yml at runtime)
+#   FRONTEND_AGENT_WS_URL           — public agent WebSocket URL (e.g. wss://yourdomain.com:50052), leave empty to disable
+#   FRONTEND_LINE_WEBHOOK_BASE_URL  — LINE webhook base URL (e.g. https://yourdomain.com/api), leave empty to disable
+# ──────────────────────────────────────────────────────────────────────────────
+
+env:
+  # Release events provide tag_name; manual dispatch uses the input; fallback = latest
+  IMAGE_TAG: ${{ github.event.release.tag_name || inputs.tag || 'latest' }}
+  DOCR_REGISTRY: registry.digitalocean.com/${{ vars.DOCR_REGISTRY_NAME }}
+
+jobs:
+  validate-image-tag:
+    name: Validate Image Tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate IMAGE_TAG
+        run: |
+          if [ -z "${{ env.IMAGE_TAG }}" ]; then
+            echo "ERROR: IMAGE_TAG is empty — check github.event.release.tag_name and inputs.tag"
+            exit 1
+          fi
+          if [ -z "${{ vars.DOCR_REGISTRY_NAME }}" ]; then
+            echo "ERROR: DOCR_REGISTRY_NAME is empty — configure the GitHub Actions variable"
+            exit 1
+          fi
+          if [ -z "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}" ]; then
+            echo "ERROR: DIGITALOCEAN_ACCESS_TOKEN is empty — configure the GitHub Actions secret"
+            exit 1
+          fi
+          echo "Deploying tag: ${{ env.IMAGE_TAG }}"
+  
+  # ── Parrallel Build ──────────────────
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    needs: validate-image-tag
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Log in to DigitalOcean Container Registry
+        run: doctl registries login ${{ vars.DOCR_REGISTRY_NAME }} --expiry-seconds 1200
+
+      - name: Build frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCR_REGISTRY }}/capstone-frontend:latest
+            ${{ env.DOCR_REGISTRY }}/capstone-frontend:${{ env.IMAGE_TAG }}
+          # NEXT_PUBLIC_* are baked into the bundle at build time
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.FRONTEND_API_URL }}
+            NEXT_PUBLIC_AGENT_WS_URL=${{ vars.FRONTEND_AGENT_WS_URL }}
+            NEXT_PUBLIC_LINE_WEBHOOK_BASE_URL=${{ vars.FRONTEND_LINE_WEBHOOK_BASE_URL }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+  build-backend:
+    name: Build Backend
+    runs-on: ubuntu-latest
+    needs: validate-image-tag
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Log in to DigitalOcean Container Registry
+        run: doctl registries login ${{ vars.DOCR_REGISTRY_NAME }} --expiry-seconds 1200
+
+      - name: Build backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCR_REGISTRY }}/capstone-backend:latest
+            ${{ env.DOCR_REGISTRY }}/capstone-backend:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+      
+  build-agent:
+    name: Build Agent
+    runs-on: ubuntu-latest
+    needs: validate-image-tag
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Log in to DigitalOcean Container Registry
+        run: doctl registries login ${{ vars.DOCR_REGISTRY_NAME }} --expiry-seconds 1200
+
+      - name: Build agent
+        uses: docker/build-push-action@v6
+        with:
+          context: ./agent
+          file: ./agent/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCR_REGISTRY }}/capstone-agent:latest
+            ${{ env.DOCR_REGISTRY }}/capstone-agent:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,scope=agent,mode=max
+
+  # ── Job 2: Deploy to DigitalOcean droplet ───────────────────────────────────
+  deploy:
+    name: Deploy to DigitalOcean
+    runs-on: ubuntu-latest
+    needs: [build-frontend, build-backend, build-agent]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Generate short-lived DOCR Docker config
+        run: doctl registry docker-config ${{ vars.DOCR_REGISTRY_NAME }} --expiry-seconds 1200 > .docr-config.json
+
+      - name: Prepare server directories
+        uses: appleboy/ssh-action@v1.2.3
+        with:
+          host: ${{ vars.DROPLET_IP }}
+          username: admin
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 1m
+          script: |
+            set -e
+            mkdir -p /opt/capstone/backend /opt/capstone/agent
+
+      - name: Copy compose file
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ vars.DROPLET_IP }}
+          username: admin
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docker-compose.prd.yml"
+          # target is a directory — file lands at /opt/capstone/docker-compose.prd.yml
+          target: "/opt/capstone"
+
+      - name: Copy DOCR Docker config
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ vars.DROPLET_IP }}
+          username: admin
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: ".docr-config.json"
+          target: "/opt/capstone"
+
+      - name: Write .env files on server
+        uses: appleboy/ssh-action@v1.2.3
+        env:
+          BACKEND_ENV: ${{ secrets.BACKEND_ENV }}
+          AGENT_ENV: ${{ secrets.AGENT_ENV }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+        with:
+          host: ${{ vars.DROPLET_IP }}
+          username: admin
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: BACKEND_ENV,AGENT_ENV,REDIS_PASSWORD
+          command_timeout: 1m
+          script: |
+            set -e
+            printf '%s' "${BACKEND_ENV}"    > /opt/capstone/backend/.env
+            printf '%s' "${AGENT_ENV}"      > /opt/capstone/agent/.env
+            cat > /opt/capstone/.env <<EOF
+            REDIS_PASSWORD=${REDIS_PASSWORD}
+            IMAGE_TAG=${{ env.IMAGE_TAG }}
+            DOCR_REGISTRY_NAME=${{ vars.DOCR_REGISTRY_NAME }}
+            EOF
+            chmod 600 /opt/capstone/backend/.env \
+                      /opt/capstone/agent/.env \
+                      /opt/capstone/.env
+
+      - name: Pull images & restart
+        uses: appleboy/ssh-action@v1.2.3
+        with:
+          host: ${{ vars.DROPLET_IP }}
+          username: admin
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 10m
+          script: |
+            set -e
+            cd /opt/capstone
+            mkdir -p ~/.docker
+            cp /opt/capstone/.docr-config.json ~/.docker/config.json
+            chmod 600 ~/.docker/config.json
+            docker compose -f docker-compose.prd.yml pull frontend-prd backend-prd agent-prd
+            docker compose -f docker-compose.prd.yml up -d --remove-orphans
+            rm -f ~/.docker/config.json /opt/capstone/.docr-config.json
+            docker image prune -f
+
+      - name: Verify deployment health
+        uses: appleboy/ssh-action@v1.2.3
+        with:
+          host: ${{ vars.DROPLET_IP }}
+          username: admin
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 2m
+          # Poll the backend health endpoint for up to 60s; stop containers on failure
+          # (no auto-restart — operator must investigate and re-trigger the workflow)
+          script: |
+            set -e
+            echo "Waiting for frontend to become healthy..."
+            for i in $(seq 1 12); do
+              if curl -sf http://localhost:3000/ > /dev/null 2>&1; then
+                echo "Frontend is healthy."
+                exit 0
+              fi
+              echo "  attempt ${i}/12 — retrying in 5s"
+              sleep 5
+            done
+            echo "ERROR: frontend did not become healthy within 60s — stopping all containers"
+            docker compose -f /opt/capstone/docker-compose.prd.yml ps
+            docker compose -f /opt/capstone/docker-compose.prd.yml logs --tail=50
+            docker compose -f /opt/capstone/docker-compose.prd.yml down
+            exit 1

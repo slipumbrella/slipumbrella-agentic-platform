@@ -1,0 +1,38 @@
+[project]
+name = "agent"
+version = "0.1.0"
+description = "EGCO Agent Platform — Python gRPC agent service"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "agent-framework>=1.0.0rc2",
+    "aiohttp>=3.12.0",
+    "beautifulsoup4>=4.13.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.12.4",
+    "pydantic-settings>=2.0",
+    "grpcio>=1.66.2",
+    "grpcio-tools>=1.66.2",
+    "asyncpg>=0.29.0",
+    "httpx>=0.27.0",
+    "matplotlib>=3.10.0",
+    "numpy>=2.2.0",
+    "pint>=0.24.0",
+    "boto3>=1.34.0",
+    "redis[hiredis]>=5.0.0",
+    "scipy>=1.15.0",
+    "sympy>=1.13.0",
+    "websockets>=14.0",
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+    "deepeval>=2.0.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.23.0",
+    "google-auth-httplib2>=0.2.0",
+    "ddgs>=9.12.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+pythonpath = [".."]
+testpaths = ["tests"]
